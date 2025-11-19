@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react'
 export default function MapSection() {
   const mapRef = useRef(null)
   const [activeLayer, setActiveLayer] = useState('heat')
+  const [base, setBase] = useState('streets')
   const [ready, setReady] = useState(false)
   const mapInstanceRef = useRef(null)
   const layersRef = useRef({})
@@ -18,17 +19,40 @@ export default function MapSection() {
       const mandera = [3.9356, 41.8551]
       const map = L.map(mapRef.current, {
         zoomControl: false,
-        attributionControl: false,
-      }).setView(mandera, 11)
+        attributionControl: true,
+        minZoom: 5,
+        maxZoom: 19,
+      }).setView(mandera, 12)
 
-      // Satellite tiles via Esri
-      const satellite = L.tileLayer(
-        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-        { maxZoom: 18 }
+      // Base layers
+      const streets = L.tileLayer(
+        'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        {
+          maxZoom: 19,
+          attribution: '&copy; OpenStreetMap contributors'
+        }
       ).addTo(map)
 
-      // Add zoom control bottom-right
+      const satellite = L.tileLayer(
+        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        {
+          maxZoom: 18,
+          attribution: 'Imagery &copy; Esri'
+        }
+      )
+
+      // Optional: Esri World Street Map (alternative streets style)
+      const esriStreets = L.tileLayer(
+        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
+        {
+          maxZoom: 19,
+          attribution: 'Tiles &copy; Esri'
+        }
+      )
+
+      // Add zoom control bottom-right + scale bar
       L.control.zoom({ position: 'bottomright' }).addTo(map)
+      L.control.scale({ position: 'bottomleft', imperial: false }).addTo(map)
 
       // Mock IoT sensor hotspots
       const hotspots = [
@@ -51,10 +75,10 @@ export default function MapSection() {
         return marker
       })
 
-      // Vegetation layer (NDVI-like) using tinted tiles (added on demand)
+      // Vegetation layer (placeholder) using tinted tiles (added on demand)
       const veg = L.tileLayer(
-        'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-        { opacity: 0.0 }
+        'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        { opacity: 0.25 }
       )
 
       // Built environment stress layer - simple grid overlay
@@ -125,7 +149,7 @@ export default function MapSection() {
       }
       drawHeat()
 
-      layersRef.current = { satellite, veg, gridLayer, hotspotMarkers, overlayCanvas }
+      layersRef.current = { streets, esriStreets, satellite, veg, gridLayer, hotspotMarkers, overlayCanvas }
       mapInstanceRef.current = map
 
       // Fix for initial hidden container sizing issues
@@ -143,6 +167,7 @@ export default function MapSection() {
     }
   }, [])
 
+  // Handle thematic overlay toggles
   useEffect(() => {
     const L = window.L
     const map = mapInstanceRef.current
@@ -162,6 +187,28 @@ export default function MapSection() {
     }
   }, [activeLayer])
 
+  // Handle base layer switching (streets/satellite)
+  useEffect(() => {
+    const L = window.L
+    const map = mapInstanceRef.current
+    if (!L || !map) return
+
+    const { streets, esriStreets, satellite } = layersRef.current
+
+    // Remove all base layers first
+    ;[streets, esriStreets, satellite].forEach(layer => {
+      if (layer && map.hasLayer(layer)) map.removeLayer(layer)
+    })
+
+    if (base === 'streets') {
+      streets && streets.addTo(map)
+    } else if (base === 'esriStreets') {
+      esriStreets && esriStreets.addTo(map)
+    } else if (base === 'satellite') {
+      satellite && satellite.addTo(map)
+    }
+  }, [base])
+
   return (
     <section className="relative bg-[#07120c]">
       <div className="mx-auto max-w-7xl px-6 md:px-12 py-8 md:py-10">
@@ -178,7 +225,21 @@ export default function MapSection() {
 
               <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-emerald-500/10 via-transparent to-transparent" />
 
-              <div className="absolute top-4 left-4 z-[500] flex gap-2">
+              {/* Base layer toggle */}
+              <div className="absolute top-4 left-4 z-[600] flex gap-2">
+                {[
+                  { key: 'streets', label: 'Streets' },
+                  { key: 'esriStreets', label: 'Esri Streets' },
+                  { key: 'satellite', label: 'Satellite' },
+                ].map(({ key, label }) => (
+                  <button key={key} onClick={() => setBase(key)} className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all shadow ring-1 ring-white/10 backdrop-blur ${base===key ? 'bg-emerald-400 text-black' : 'bg-black/60 text-emerald-100 hover:bg-black/70'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Thematic layer toggle */}
+              <div className="absolute top-16 left-4 z-[500] flex gap-2">
                 {['heat','vegetation','built'].map(key => (
                   <button key={key} onClick={() => setActiveLayer(key)} className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all shadow ring-1 ring-white/10 backdrop-blur ${activeLayer===key ? 'bg-emerald-500 text-black' : 'bg-black/50 text-emerald-100 hover:bg-black/60'}`}>
                     {key === 'heat' ? 'Heat Index' : key === 'vegetation' ? 'Vegetation' : 'Built Stress'}

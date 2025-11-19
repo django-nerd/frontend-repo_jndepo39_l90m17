@@ -17,7 +17,14 @@ export default function Hero() {
     let trees = []
     let targetCount = 0
     let lastTime = 0
+    let startTime = 0
+
+    // Planter sweep state: a moving "crew" that plants trees across the scene
+    let planterX = 0
+    let sweepDir = 1 // 1 -> right, -1 -> left
+
     const rand = (a,b) => a + Math.random()*(b-a)
+    const clamp = (v,a,b) => Math.max(a, Math.min(b, v))
 
     const resize = () => {
       const rect = canvas.parentElement.getBoundingClientRect()
@@ -30,13 +37,16 @@ export default function Hero() {
       canvas.style.height = height + 'px'
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
-      // Density scales with area
+      // Density scales with area (lighter on mobile)
       const area = width * height
-      const density = 0.00015 // trees per pixel
-      targetCount = Math.max(60, Math.min(600, Math.floor(area * density)))
+      const baseDensity = width < 640 ? 0.00009 : 0.00015
+      targetCount = Math.max(50, Math.min(550, Math.floor(area * baseDensity)))
 
-      // Keep previously planted trees if any, reduce if too many
       if (trees.length > targetCount) trees.length = targetCount
+
+      // Reset planter sweep
+      planterX = width * 0.1
+      sweepDir = 1
     }
 
     // Simple value noise for wind sway
@@ -59,36 +69,42 @@ export default function Hero() {
       return top*(1-v) + bot*v
     }
 
-    const tryPlace = () => {
-      // Place with simple minimum spacing to avoid heavy clustering
-      const attempts = 8
-      for (let k=0;k<attempts;k++) {
-        const x = rand(20, width-20)
-        // favor lower half to look like horizon-to-foreground planting
-        const y = rand(height*0.35, height-10)
-        const minDist = 12
-        let ok = true
-        for (let i=0;i<trees.length;i++) {
-          const dx = trees[i].x - x
-          const dy = trees[i].y - y
-          if (dx*dx + dy*dy < minDist*minDist) { ok = false; break }
-        }
-        if (ok) {
-          const scale = rand(0.7, 1.4)
-          trees.push({
-            x, y,
-            growth: 0, // 0..1
-            growSpeed: rand(0.025, 0.06),
-            trunkHue: rand(22, 28),
-            leafHue: rand(135, 155), // emerald greens
-            leafVar: rand(-6, 6),
-            height: rand(26, 52) * scale,
-            crown: rand(14, 28) * scale,
-            phase: rand(0, Math.PI*2)
-          })
-          return
-        }
+    const spacingOk = (x,y,minDist) => {
+      for (let i=0;i<trees.length;i++) {
+        const dx = trees[i].x - x
+        const dy = trees[i].y - y
+        if (dx*dx + dy*dy < minDist*minDist) return false
       }
+      return true
+    }
+
+    const tryPlaceNear = (px) => {
+      // Favor lower band; jitter around planterX to feel like active planting
+      const attempts = 10
+      for (let k=0;k<attempts;k++) {
+        const x = clamp(rand(px-40, px+40), 16, width-16)
+        const yBandTop = height * 0.45
+        const y = rand(yBandTop, height - 12)
+        const minDist = 14
+        if (!spacingOk(x,y,minDist)) continue
+
+        const scale = rand(0.75, 1.35)
+        const now = performance.now()/1000
+        trees.push({
+          x, y,
+          plantedAt: now,
+          growth: 0, // 0..1
+          growSpeed: rand(0.018, 0.04),
+          trunkHue: rand(22, 28),
+          leafHue: rand(135, 155),
+          leafVar: rand(-6, 6),
+          height: rand(28, 56) * scale,
+          crown: rand(15, 30) * scale,
+          phase: rand(0, Math.PI*2)
+        })
+        return true
+      }
+      return false
     }
 
     const drawGround = () => {
@@ -98,9 +114,44 @@ export default function Hero() {
       g.addColorStop(1, 'rgba(6,24,20,0.45)')
       ctx.fillStyle = g
       ctx.fillRect(0, 0, width, height)
+
+      // Horizon haze
+      const haze = ctx.createLinearGradient(0, 0, 0, height*0.5)
+      haze.addColorStop(0, 'rgba(0,0,0,0.35)')
+      haze.addColorStop(1, 'rgba(0,0,0,0)')
+      ctx.fillStyle = haze
+      ctx.fillRect(0, 0, width, height*0.5)
+    }
+
+    const drawPlantingEffect = (t, now) => {
+      const age = now - t.plantedAt
+      if (age > 1.2) return
+      const baseAlpha = 1 - smoothstep(clamp(age/1.2, 0, 1))
+
+      // Soil ring pulse at base
+      ctx.save()
+      ctx.translate(t.x, t.y)
+      ctx.strokeStyle = `rgba(16,185,129,${0.35*baseAlpha})`
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      const r = 4 + 16 * (age/1.2)
+      ctx.arc(0, 0, r, 0, Math.PI*2)
+      ctx.stroke()
+
+      // Upward shimmer to suggest planting action
+      ctx.globalAlpha = 0.3 * baseAlpha
+      ctx.fillStyle = 'rgba(16,185,129,0.35)'
+      ctx.beginPath()
+      ctx.moveTo(-2, -6 - 16*age)
+      ctx.lineTo(2, -6 - 16*age)
+      ctx.lineTo(0, -18 - 16*age)
+      ctx.closePath()
+      ctx.fill()
+      ctx.restore()
     }
 
     const drawTree = (t, now) => {
+      const age = now - t.plantedAt
       const g = t.growth
       if (g <= 0) return
 
@@ -108,75 +159,112 @@ export default function Hero() {
       const wind = (valueNoise2D(t.x*0.01, t.y*0.01, now*0.2) - 0.5) * 2
       const sway = Math.sin(now*1.2 + t.phase) * 0.05 + wind * 0.08
 
+      // Stage-based visuals
+      const seedling = g < 0.33
+      const sapling = g >= 0.33 && g < 0.75
+      const mature = g >= 0.75
+
       // Sizes scale with growth
       const H = t.height * g
-      const R = t.crown * (0.6 + 0.4*Math.min(1, g*1.5))
+      const R = t.crown * (0.5 + 0.5*Math.min(1, g*1.4))
 
-      // Trunk
       ctx.save()
       ctx.translate(t.x, t.y)
       ctx.rotate(sway)
+
+      // Trunk / stem
       ctx.strokeStyle = `hsla(${t.trunkHue}, 40%, 35%, ${0.6 + 0.4*g})`
-      ctx.lineWidth = Math.max(1, 1.1 + 1.2*g)
       ctx.lineCap = 'round'
+      ctx.lineWidth = seedling ? 1 : Math.max(1.2, 1.1 + 1.3*g)
       ctx.beginPath()
       ctx.moveTo(0, 0)
       ctx.lineTo(0, -H)
       ctx.stroke()
 
-      // Simple bifurcated branch near top
-      ctx.beginPath()
-      ctx.moveTo(0, -H*0.6)
-      ctx.lineTo(R*0.15, -H*0.85)
-      ctx.moveTo(0, -H*0.55)
-      ctx.lineTo(-R*0.12, -H*0.8)
-      ctx.stroke()
-
-      // Canopy: clustered blobs
+      // Early leaves as small pair
       const hue = t.leafHue + t.leafVar
-      const alpha = 0.15 + 0.5*g
-      const light = 28 + g*24
-      ctx.fillStyle = `hsla(${hue}, 55%, ${light}%, ${alpha})`
-
-      const cx = 0
-      const cy = -H
-      const blobs = [
-        {dx:0, dy:0, r:R},
-        {dx:R*0.4, dy:-R*0.2, r:R*0.75},
-        {dx:-R*0.45, dy:-R*0.1, r:R*0.7},
-        {dx:0, dy:R*0.2, r:R*0.6},
-      ]
-      blobs.forEach(b => {
+      if (seedling) {
+        ctx.fillStyle = `hsla(${hue}, 65%, ${28 + g*30}%, ${0.5 + 0.3*g})`
         ctx.beginPath()
-        ctx.arc(cx + b.dx, cy + b.dy, b.r, 0, Math.PI*2)
+        ctx.ellipse(3, -H*0.9, 4, 6, 0.2, 0, Math.PI*2)
         ctx.fill()
-      })
+        ctx.beginPath()
+        ctx.ellipse(-3, -H*0.9, 4, 6, -0.2, 0, Math.PI*2)
+        ctx.fill()
+      } else {
+        // Simple bifurcated branch near top for sapling/mature
+        ctx.beginPath()
+        ctx.moveTo(0, -H*0.6)
+        ctx.lineTo(R*0.15, -H*0.85)
+        ctx.moveTo(0, -H*0.55)
+        ctx.lineTo(-R*0.12, -H*0.8)
+        ctx.stroke()
 
-      // Highlight edge for depth
-      const grad = ctx.createRadialGradient(cx+R*0.3, cy-R*0.6, R*0.1, cx, cy, R*1.6)
-      grad.addColorStop(0, `hsla(${hue}, 70%, ${light+18}%, ${alpha*0.8})`)
-      grad.addColorStop(1, 'hsla(0,0%,0%,0)')
-      ctx.fillStyle = grad
-      ctx.beginPath()
-      ctx.arc(cx, cy, R*1.4, 0, Math.PI*2)
-      ctx.fill()
+        // Canopy: clustered blobs
+        const alpha = sapling ? (0.12 + 0.45*g) : (0.18 + 0.5*g)
+        const light = 28 + g*24
+        ctx.fillStyle = `hsla(${hue}, 55%, ${light}%, ${alpha})`
+
+        const cx = 0
+        const cy = -H
+        const blobs = [
+          {dx:0, dy:0, r:R},
+          {dx:R*0.4, dy:-R*0.2, r:R*0.75},
+          {dx:-R*0.45, dy:-R*0.1, r:R*0.7},
+          {dx:0, dy:R*0.2, r:R*0.6},
+        ]
+        blobs.forEach(b => {
+          ctx.beginPath()
+          ctx.arc(cx + b.dx, cy + b.dy, b.r, 0, Math.PI*2)
+          ctx.fill()
+        })
+
+        // Highlight edge for depth
+        const grad = ctx.createRadialGradient(cx+R*0.3, cy-R*0.6, R*0.1, cx, cy, R*1.6)
+        grad.addColorStop(0, `hsla(${hue}, 70%, ${light+18}%, ${alpha*0.8})`)
+        grad.addColorStop(1, 'hsla(0,0%,0%,0)')
+        ctx.fillStyle = grad
+        ctx.beginPath()
+        ctx.arc(cx, cy, R*1.4, 0, Math.PI*2)
+        ctx.fill()
+      }
 
       ctx.restore()
+
+      // Tiny ground shadow
+      ctx.save()
+      ctx.globalAlpha = 0.2
+      ctx.fillStyle = '#000'
+      ctx.beginPath()
+      const sr = 2 + 6*g
+      ctx.ellipse(t.x, t.y+1, sr*1.6, sr, 0, 0, Math.PI*2)
+      ctx.fill()
+      ctx.restore()
+
+      // Planting sparkle for fresh trees
+      drawPlantingEffect(t, now)
     }
 
     const step = (time) => {
       if (!running) return
-      if (!lastTime) lastTime = time
+      if (!lastTime) { lastTime = time; startTime = time }
       const dt = Math.min(0.05, (time - lastTime)/1000)
       lastTime = time
       const now = time/1000
 
-      // Plant new trees gradually to feel like ongoing restoration
-      const plantRate = 6 // per second max
-      const toPlant = Math.min(targetCount - trees.length, Math.floor(plantRate * dt * (0.5 + Math.random())))
-      for (let i=0;i<toPlant;i++) tryPlace()
+      // Move planter sweep left-right over time
+      const sweepSpeed = Math.max(40, width * 0.08) // px/s
+      planterX += sweepDir * sweepSpeed * dt
+      if (planterX > width*0.9) { sweepDir = -1 } else if (planterX < width*0.1) { sweepDir = 1 }
 
-      // Clear fully (no trails for trees)
+      // Plant new trees gradually along the sweep to feel actively planted
+      const maxRate = 7 // per second
+      let toPlant = Math.min(targetCount - trees.length, Math.floor(maxRate * dt * (0.75 + Math.random()*0.5)))
+      while (toPlant-- > 0) {
+        if (!tryPlaceNear(planterX)) break
+      }
+
+      // Clear
       ctx.clearRect(0, 0, width, height)
 
       // Ground
@@ -185,7 +273,7 @@ export default function Hero() {
       // Sort by y to fake depth (farther first)
       trees.sort((a,b) => a.y - b.y)
 
-      // Update & draw
+      // Update growth & draw
       for (let i=0;i<trees.length;i++) {
         const tObj = trees[i]
         if (tObj.growth < 1) tObj.growth = Math.min(1, tObj.growth + tObj.growSpeed * dt * 60)
@@ -220,7 +308,7 @@ export default function Hero() {
 
   return (
     <section className="relative h-[48vh] md:h-[60vh] w-full overflow-hidden bg-black">
-      {/* Tree planting background animation */}
+      {/* Tree planting background animation (seedling -> sapling -> mature) */}
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
 
       {/* Subtle gradient glow layers retained for depth */}

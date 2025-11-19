@@ -1,0 +1,4 @@
+/* Leaflet CSS from CDN fallback if needed */
+@import url('https://unpkg.com/leaflet@1.9.4/dist/leaflet.css');
+
+#map { height: 100%; width: 100%; }

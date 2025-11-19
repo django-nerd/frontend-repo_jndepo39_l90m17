@@ -1,11 +1,14 @@
 import React from 'react'
-import Spline from '@splinetool/react-spline'
 
 export default function Hero() {
   return (
     <section className="relative h-[48vh] md:h-[60vh] w-full overflow-hidden bg-black">
+      {/* Animated gradient background (Spline-free fallback) */}
       <div className="absolute inset-0">
-        <Spline scene="https://prod.spline.design/6tUXqVcUA0xgJugv/scene.splinecode" style={{ width: '100%', height: '100%' }} />
+        <div className="w-full h-full bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-emerald-700/20 via-emerald-500/10 to-transparent animate-pulse" />
+        <div className="absolute -inset-1 blur-3xl opacity-50">
+          <div className="w-full h-full bg-gradient-to-tr from-emerald-600/20 via-emerald-400/10 to-sky-500/10 animate-[spin_18s_linear_infinite] rounded-full" />
+        </div>
       </div>
 
       {/* Gradient edge overlays */}

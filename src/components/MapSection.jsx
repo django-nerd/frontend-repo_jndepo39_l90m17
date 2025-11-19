@@ -1,19 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react'
 
-// Note: We use Leaflet via CDN in index.html to avoid npm install, accessed from window.L
 export default function MapSection() {
   const mapRef = useRef(null)
   const [activeLayer, setActiveLayer] = useState('heat')
+  const [ready, setReady] = useState(false)
   const mapInstanceRef = useRef(null)
   const layersRef = useRef({})
 
   useEffect(() => {
     if (!mapRef.current) return
-    // Ensure Leaflet is available
-    const L = window.L
-    if (!L) return
 
-    if (!mapInstanceRef.current) {
+    const init = () => {
+      const L = window.L
+      if (!L || mapInstanceRef.current) return
+
       // Initialize map centered on Mandera County
       const mandera = [3.9356, 41.8551]
       const map = L.map(mapRef.current, {
@@ -48,27 +48,10 @@ export default function MapSection() {
           className: 'hotspot-marker'
         }).bindTooltip(`${h.name}`, { direction: 'top' })
         marker.addTo(map)
-        // hover pulse via CSS class
         return marker
       })
 
-      // Heat layer using canvas overlay
-      const heatCanvas = L.canvasLayer ? L.canvasLayer() : null
-      let heatCtx
-      let heatCanvasEl
-      if (heatCanvas) {
-        heatCanvas.addTo(map)
-        heatCanvas.delegate({
-          onDrawLayer: function(info) {
-            const { canvas, bounds, zoom } = info
-            heatCanvasEl = canvas
-            heatCtx = canvas.getContext('2d')
-            drawHeat(map, heatCtx, canvas, bounds, zoom)
-          },
-        })
-      }
-
-      // Vegetation layer (NDVI-like) using tinted tiles
+      // Vegetation layer (NDVI-like) using tinted tiles (added on demand)
       const veg = L.tileLayer(
         'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
         { opacity: 0.0 }
@@ -88,7 +71,6 @@ export default function MapSection() {
         g.addColorStop(1, 'rgba(249, 115, 22, 0.18)')
         ctx.fillStyle = g
         ctx.fillRect(0,0,256,256)
-        // subtle diagonal hatch
         ctx.strokeStyle = 'rgba(250, 204, 21, 0.25)'
         ctx.lineWidth = 1
         for (let i = -256; i < 512; i += 16) {
@@ -100,8 +82,64 @@ export default function MapSection() {
         return tile
       }
 
-      layersRef.current = { satellite, heatCanvas, veg, gridLayer, hotspotMarkers }
+      // Simple animated heat effect using a canvas overlay tied to map pane
+      const overlayCanvas = document.createElement('canvas')
+      overlayCanvas.style.position = 'absolute'
+      overlayCanvas.style.top = '0'
+      overlayCanvas.style.left = '0'
+      overlayCanvas.style.pointerEvents = 'none'
+      const overlayPane = map.getPane('overlayPane')
+      overlayPane.appendChild(overlayCanvas)
+
+      const resize = () => {
+        const size = map.getSize()
+        overlayCanvas.width = size.x
+        overlayCanvas.height = size.y
+      }
+      map.on('resize', resize)
+      resize()
+
+      const octx = overlayCanvas.getContext('2d')
+      const drawHeat = () => {
+        const w = overlayCanvas.width
+        const h = overlayCanvas.height
+        octx.clearRect(0,0,w,h)
+        const t = Date.now() * 0.001
+        const blobs = [
+          { x: 0.3 + 0.05*Math.sin(t), y: 0.4, r: 0.25, c1: 'rgba(239,68,68,0.35)', c2:'rgba(250,204,21,0.3)' },
+          { x: 0.6, y: 0.5 + 0.03*Math.cos(t*1.2), r: 0.22, c1: 'rgba(250,204,21,0.32)', c2:'rgba(34,197,94,0.28)' },
+          { x: 0.45, y: 0.65 + 0.04*Math.sin(t*0.8), r: 0.2, c1: 'rgba(239,68,68,0.3)', c2:'rgba(34,197,94,0.25)' },
+        ]
+        blobs.forEach(b => {
+          const gx = b.x * w
+          const gy = b.y * h
+          const gr = octx.createRadialGradient(gx, gy, 0, gx, gy, b.r * Math.min(w, h))
+          gr.addColorStop(0, b.c1)
+          gr.addColorStop(1, b.c2)
+          octx.fillStyle = gr
+          octx.beginPath()
+          octx.arc(gx, gy, b.r * Math.min(w, h), 0, Math.PI*2)
+          octx.fill()
+        })
+        requestAnimationFrame(drawHeat)
+      }
+      drawHeat()
+
+      layersRef.current = { satellite, veg, gridLayer, hotspotMarkers, overlayCanvas }
       mapInstanceRef.current = map
+
+      // Fix for initial hidden container sizing issues
+      setTimeout(() => map.invalidateSize(), 50)
+      setReady(true)
+    }
+
+    // If Leaflet is already loaded, init immediately; otherwise wait for signal
+    if (window.L) {
+      init()
+    } else {
+      const handler = () => init()
+      window.addEventListener('leaflet:loaded', handler, { once: true })
+      return () => window.removeEventListener('leaflet:loaded', handler)
     }
   }, [])
 
@@ -110,48 +148,19 @@ export default function MapSection() {
     const map = mapInstanceRef.current
     if (!L || !map) return
 
-    const { heatCanvas, veg, gridLayer } = layersRef.current
+    const { veg, gridLayer } = layersRef.current
 
-    // manage layer visibility
     if (activeLayer === 'heat') {
-      if (veg) map.removeLayer(veg)
-      if (gridLayer) map.removeLayer(gridLayer)
+      if (veg && map.hasLayer(veg)) map.removeLayer(veg)
+      if (gridLayer && map.hasLayer(gridLayer)) map.removeLayer(gridLayer)
     } else if (activeLayer === 'vegetation') {
       if (veg && !map.hasLayer(veg)) veg.addTo(map)
-      if (gridLayer) map.removeLayer(gridLayer)
+      if (gridLayer && map.hasLayer(gridLayer)) map.removeLayer(gridLayer)
     } else if (activeLayer === 'built') {
-      if (veg) map.removeLayer(veg)
+      if (veg && map.hasLayer(veg)) map.removeLayer(veg)
       if (gridLayer && !map.hasLayer(gridLayer)) gridLayer.addTo(map)
     }
   }, [activeLayer])
-
-  function drawHeat(map, ctx, canvas, bounds, zoom) {
-    // Animated gradient blobs to mimic heat index
-    const w = canvas.width
-    const h = canvas.height
-    ctx.clearRect(0,0,w,h)
-
-    const t = Date.now() * 0.001
-    const blobs = [
-      { x: 0.3 + 0.05*Math.sin(t), y: 0.4, r: 0.25, c1: 'rgba(239,68,68,0.35)', c2:'rgba(250,204,21,0.3)' },
-      { x: 0.6, y: 0.5 + 0.03*Math.cos(t*1.2), r: 0.22, c1: 'rgba(250,204,21,0.32)', c2:'rgba(34,197,94,0.28)' },
-      { x: 0.45, y: 0.65 + 0.04*Math.sin(t*0.8), r: 0.2, c1: 'rgba(239,68,68,0.3)', c2:'rgba(34,197,94,0.25)' },
-    ]
-
-    blobs.forEach(b => {
-      const gx = b.x * w
-      const gy = b.y * h
-      const gr = ctx.createRadialGradient(gx, gy, 0, gx, gy, b.r * Math.min(w, h))
-      gr.addColorStop(0, b.c1)
-      gr.addColorStop(1, b.c2)
-      ctx.fillStyle = gr
-      ctx.beginPath()
-      ctx.arc(gx, gy, b.r * Math.min(w, h), 0, Math.PI*2)
-      ctx.fill()
-    })
-
-    requestAnimationFrame(() => drawHeat(map, ctx, canvas, bounds, zoom))
-  }
 
   return (
     <section className="relative bg-[#07120c]">
@@ -161,9 +170,14 @@ export default function MapSection() {
             <div className="relative h-[52vh] md:h-[64vh] w-full overflow-hidden rounded-2xl border border-emerald-500/20 shadow-[0_10px_40px_rgba(16,185,129,0.25)]">
               <div ref={mapRef} id="map" className="h-full w-full" />
 
+              {!ready && (
+                <div className="absolute inset-0 grid place-items-center bg-black/40 text-emerald-100 text-sm">
+                  Loading map…
+                </div>
+              )}
+
               <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-emerald-500/10 via-transparent to-transparent" />
 
-              {/* Layer toggles */}
               <div className="absolute top-4 left-4 z-[500] flex gap-2">
                 {['heat','vegetation','built'].map(key => (
                   <button key={key} onClick={() => setActiveLayer(key)} className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all shadow ring-1 ring-white/10 backdrop-blur ${activeLayer===key ? 'bg-emerald-500 text-black' : 'bg-black/50 text-emerald-100 hover:bg-black/60'}`}>
@@ -172,7 +186,6 @@ export default function MapSection() {
                 ))}
               </div>
 
-              {/* Legend */}
               <div className="absolute bottom-4 left-4 z-[500]">
                 <div className="rounded-xl bg-black/60 backdrop-blur px-3 py-2 text-emerald-50 text-xs ring-1 ring-white/10">
                   <div className="font-semibold mb-1">Heat Index</div>
@@ -186,9 +199,7 @@ export default function MapSection() {
             </div>
           </div>
 
-          {/* Right-side panels */}
           <div className="lg:w-1/3 space-y-6">
-            {/* Real-Time Stats */}
             <div className="rounded-2xl bg-gradient-to-b from-emerald-400/10 to-emerald-500/10 border border-emerald-400/20 p-4 md:p-5 backdrop-blur shadow-[0_10px_30px_rgba(16,185,129,0.2)]">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-emerald-100 font-semibold">Real-Time Climate</h3>
@@ -203,7 +214,6 @@ export default function MapSection() {
               </div>
             </div>
 
-            {/* Insights */}
             <div className="rounded-2xl bg-black/50 border border-emerald-400/20 p-4 md:p-5 backdrop-blur">
               <h3 className="text-emerald-100 font-semibold mb-3">Urban Planning Insights</h3>
               <ul className="space-y-2 text-emerald-100/90 text-sm">
@@ -213,7 +223,6 @@ export default function MapSection() {
               </ul>
             </div>
 
-            {/* Alerts */}
             <div className="rounded-2xl bg-black/50 border border-emerald-400/20 p-4 md:p-5 backdrop-blur">
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-emerald-100 font-semibold">Alerts Feed</h3>
@@ -228,7 +237,6 @@ export default function MapSection() {
           </div>
         </div>
 
-        {/* Impact Metrics */}
         <div className="mt-8 grid grid-cols-2 md:grid-cols-4 gap-4">
           <KPI label="Citizens Reached" value="128,450" />
           <KPI label="Sensors Online" value="24" />

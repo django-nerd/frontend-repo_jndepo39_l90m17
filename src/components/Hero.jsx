@@ -11,16 +11,13 @@ export default function Hero() {
 
     let width = 0, height = 0
     let dpr = Math.min(window.devicePixelRatio || 1, 2)
-    let particles = []
     let running = true
 
-    // Performance trackers
+    // Forest state
+    let trees = []
+    let targetCount = 0
     let lastTime = 0
-    let fpsEMA = 60
-
-    // Utility
     const rand = (a,b) => a + Math.random()*(b-a)
-    const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
 
     const resize = () => {
       const rect = canvas.parentElement.getBoundingClientRect()
@@ -32,12 +29,17 @@ export default function Hero() {
       canvas.style.width = width + 'px'
       canvas.style.height = height + 'px'
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      buildParticles(true)
-      // prime
-      ctx.clearRect(0,0,width,height)
+
+      // Density scales with area
+      const area = width * height
+      const density = 0.00015 // trees per pixel
+      targetCount = Math.max(60, Math.min(600, Math.floor(area * density)))
+
+      // Keep previously planted trees if any, reduce if too many
+      if (trees.length > targetCount) trees.length = targetCount
     }
 
-    // Lightweight value noise (tile-free enough for our scale)
+    // Simple value noise for wind sway
     const hash = (x, y, t) => {
       const s = Math.sin(x*127.1 + y*311.7 + t*0.123) * 43758.5453
       return s - Math.floor(s)
@@ -57,136 +59,138 @@ export default function Hero() {
       return top*(1-v) + bot*v
     }
 
-    // Approximate curl of scalar noise by rotating gradient 90 degrees
-    // Gives a divergence-free field for fluid-like motion
-    const curlNoise = (x, y, t, scale=0.0035) => {
-      const eps = 0.0005
-      const nx = x*scale, ny = y*scale
-      const n1 = valueNoise2D(nx+eps, ny, t)
-      const n2 = valueNoise2D(nx-eps, ny, t)
-      const n3 = valueNoise2D(nx, ny+eps, t)
-      const n4 = valueNoise2D(nx, ny-eps, t)
-      const dndx = (n1 - n2) / (2*eps)
-      const dndy = (n3 - n4) / (2*eps)
-      // rotate gradient to get curl-like field (dy, -dx)
-      return [dndy, -dndx]
-    }
-
-    // Mesoscale wind front that slowly drifts; add slight Coriolis twist (Mandera ~4°N)
-    const windField = (x, y, t) => {
-      // Base trade-like wind predominantly E->W with diurnal modulation
-      const diurnal = Math.sin(t * 0.2) * 0.3 + 0.7
-      const base = [0.8 * diurnal, 0.05]
-
-      // Slow-moving frontal boundary sweeping across scene
-      const frontX = (Math.sin(t*0.05) * 0.5 + 0.5) * width
-      const frontFactor = Math.tanh((x - frontX) / (0.22*width)) // -1..1 across the front
-      const shear = [ -0.35*frontFactor, 0.25*frontFactor ]
-
-      // Curl noise adds eddies/turbulence
-      const [cx, cy] = curlNoise(x, y, t*0.35, 0.0025)
-
-      // Slight Coriolis-like rotation (small near equator)
-      const coriolis = 0.015
-      const rotX = -coriolis * (y - height*0.5) / height
-      const rotY = coriolis * (x - width*0.5) / width
-
-      return [base[0] + shear[0] + cx*1.8 + rotX, base[1] + shear[1] + cy*1.8 + rotY]
-    }
-
-    const buildParticles = (keepCount=false) => {
-      const area = width * height
-      const baseDensity = 0.00010 // tuned baseline
-      const target = Math.max(80, Math.min(380, Math.floor(area * baseDensity)))
-      const nextCount = keepCount ? particles.length : target
-      const count = keepCount ? clamp(nextCount, Math.floor(target*0.8), Math.floor(target*1.2)) : target
-
-      if (particles.length > count) {
-        particles.length = count
-        return
-      }
-      for (let i = particles.length; i < count; i++) {
-        particles.push(spawnParticle())
+    const tryPlace = () => {
+      // Place with simple minimum spacing to avoid heavy clustering
+      const attempts = 8
+      for (let k=0;k<attempts;k++) {
+        const x = rand(20, width-20)
+        // favor lower half to look like horizon-to-foreground planting
+        const y = rand(height*0.35, height-10)
+        const minDist = 12
+        let ok = true
+        for (let i=0;i<trees.length;i++) {
+          const dx = trees[i].x - x
+          const dy = trees[i].y - y
+          if (dx*dx + dy*dy < minDist*minDist) { ok = false; break }
+        }
+        if (ok) {
+          const scale = rand(0.7, 1.4)
+          trees.push({
+            x, y,
+            growth: 0, // 0..1
+            growSpeed: rand(0.025, 0.06),
+            trunkHue: rand(22, 28),
+            leafHue: rand(135, 155), // emerald greens
+            leafVar: rand(-6, 6),
+            height: rand(26, 52) * scale,
+            crown: rand(14, 28) * scale,
+            phase: rand(0, Math.PI*2)
+          })
+          return
+        }
       }
     }
 
-    const spawnParticle = () => {
-      const size = rand(0.6, 1.8)
-      const speed = rand(0.5, 1.4)
-      return {
-        x: rand(0,width),
-        y: rand(0,height),
-        vx: rand(-0.2, 0.2),
-        vy: rand(-0.2, 0.2),
-        life: rand(500, 1400),
-        age: rand(0, 1400),
-        size,
-        mass: size * rand(0.6, 1.3),
-        baseHue: rand(150, 170) // emerald base
-      }
+    const drawGround = () => {
+      // Subtle ground gradient to anchor trees
+      const g = ctx.createLinearGradient(0, height*0.4, 0, height)
+      g.addColorStop(0, 'rgba(6,24,20,0)')
+      g.addColorStop(1, 'rgba(6,24,20,0.45)')
+      ctx.fillStyle = g
+      ctx.fillRect(0, 0, width, height)
+    }
+
+    const drawTree = (t, now) => {
+      const g = t.growth
+      if (g <= 0) return
+
+      // Wind sway based on noise
+      const wind = (valueNoise2D(t.x*0.01, t.y*0.01, now*0.2) - 0.5) * 2
+      const sway = Math.sin(now*1.2 + t.phase) * 0.05 + wind * 0.08
+
+      // Sizes scale with growth
+      const H = t.height * g
+      const R = t.crown * (0.6 + 0.4*Math.min(1, g*1.5))
+
+      // Trunk
+      ctx.save()
+      ctx.translate(t.x, t.y)
+      ctx.rotate(sway)
+      ctx.strokeStyle = `hsla(${t.trunkHue}, 40%, 35%, ${0.6 + 0.4*g})`
+      ctx.lineWidth = Math.max(1, 1.1 + 1.2*g)
+      ctx.lineCap = 'round'
+      ctx.beginPath()
+      ctx.moveTo(0, 0)
+      ctx.lineTo(0, -H)
+      ctx.stroke()
+
+      // Simple bifurcated branch near top
+      ctx.beginPath()
+      ctx.moveTo(0, -H*0.6)
+      ctx.lineTo(R*0.15, -H*0.85)
+      ctx.moveTo(0, -H*0.55)
+      ctx.lineTo(-R*0.12, -H*0.8)
+      ctx.stroke()
+
+      // Canopy: clustered blobs
+      const hue = t.leafHue + t.leafVar
+      const alpha = 0.15 + 0.5*g
+      const light = 28 + g*24
+      ctx.fillStyle = `hsla(${hue}, 55%, ${light}%, ${alpha})`
+
+      const cx = 0
+      const cy = -H
+      const blobs = [
+        {dx:0, dy:0, r:R},
+        {dx:R*0.4, dy:-R*0.2, r:R*0.75},
+        {dx:-R*0.45, dy:-R*0.1, r:R*0.7},
+        {dx:0, dy:R*0.2, r:R*0.6},
+      ]
+      blobs.forEach(b => {
+        ctx.beginPath()
+        ctx.arc(cx + b.dx, cy + b.dy, b.r, 0, Math.PI*2)
+        ctx.fill()
+      })
+
+      // Highlight edge for depth
+      const grad = ctx.createRadialGradient(cx+R*0.3, cy-R*0.6, R*0.1, cx, cy, R*1.6)
+      grad.addColorStop(0, `hsla(${hue}, 70%, ${light+18}%, ${alpha*0.8})`)
+      grad.addColorStop(1, 'hsla(0,0%,0%,0)')
+      ctx.fillStyle = grad
+      ctx.beginPath()
+      ctx.arc(cx, cy, R*1.4, 0, Math.PI*2)
+      ctx.fill()
+
+      ctx.restore()
     }
 
     const step = (time) => {
       if (!running) return
       if (!lastTime) lastTime = time
-      const dt = (time - lastTime) / 1000 // seconds
+      const dt = Math.min(0.05, (time - lastTime)/1000)
       lastTime = time
-      const fps = 1 / Math.max(0.016, dt)
-      fpsEMA = 0.1*fps + 0.9*fpsEMA
+      const now = time/1000
 
-      // Adaptive trail fade: more fade at low FPS to avoid smearing
-      const fade = clamp(0.06 + (60 - clamp(fpsEMA, 20, 60)) * 0.0035, 0.06, 0.18)
-      ctx.fillStyle = `rgba(2,6,4,${fade})`
-      ctx.fillRect(0, 0, width, height)
+      // Plant new trees gradually to feel like ongoing restoration
+      const plantRate = 6 // per second max
+      const toPlant = Math.min(targetCount - trees.length, Math.floor(plantRate * dt * (0.5 + Math.random())))
+      for (let i=0;i<toPlant;i++) tryPlace()
 
-      ctx.globalCompositeOperation = 'lighter'
+      // Clear fully (no trails for trees)
+      ctx.clearRect(0, 0, width, height)
 
-      const t = time * 0.001
+      // Ground
+      drawGround()
 
-      for (let i = 0; i < particles.length; i++) {
-        const p = particles[i]
-        // Field acceleration
-        const [fx, fy] = windField(p.x, p.y, t)
+      // Sort by y to fake depth (farther first)
+      trees.sort((a,b) => a.y - b.y)
 
-        // Add small random gusts tied to field coherence
-        const gust = valueNoise2D(p.x*0.01, p.y*0.01, t*0.5)
-        const gx = (gust - 0.5) * 0.15
-        const gy = (gust - 0.5) * 0.08
-
-        // Integrate velocity with drag (semi-implicit Euler)
-        const drag = 0.92
-        p.vx = p.vx*drag + (fx + gx) * (0.6 / p.mass)
-        p.vy = p.vy*drag + (fy + gy) * (0.6 / p.mass)
-
-        p.x += p.vx
-        p.y += p.vy
-
-        // Wrap
-        if (p.x < -5) p.x = width + 5
-        if (p.x > width + 5) p.x = -5
-        if (p.y < -5) p.y = height + 5
-        if (p.y > height + 5) p.y = -5
-
-        // Visuals: speed-based hue shift and brightness
-        const sp = Math.hypot(p.vx, p.vy)
-        const heat = clamp((sp - 0.4) / 1.8, 0, 1) // 0..1
-        const hue = p.baseHue * (1 - heat) + 30 * heat // emerald -> amber at high speed
-        const alpha = 0.22 + heat * 0.26
-        const r = 20 * p.size * (1 + heat*0.6)
-
-        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r)
-        grad.addColorStop(0, `hsla(${hue}, 90%, ${60 + heat*20}%, ${alpha})`)
-        grad.addColorStop(1, `hsla(${hue}, 90%, 60%, 0)`)
-        ctx.fillStyle = grad
-        ctx.beginPath()
-        ctx.arc(p.x, p.y, r, 0, Math.PI*2)
-        ctx.fill()
-
-        p.age += 1
-        if (p.age > p.life) particles[i] = spawnParticle()
+      // Update & draw
+      for (let i=0;i<trees.length;i++) {
+        const tObj = trees[i]
+        if (tObj.growth < 1) tObj.growth = Math.min(1, tObj.growth + tObj.growSpeed * dt * 60)
+        drawTree(tObj, now)
       }
-
-      ctx.globalCompositeOperation = 'source-over'
 
       rafRef.current = requestAnimationFrame(step)
     }
@@ -216,14 +220,14 @@ export default function Hero() {
 
   return (
     <section className="relative h-[48vh] md:h-[60vh] w-full overflow-hidden bg-black">
-      {/* Environmental climate mass animation */}
+      {/* Tree planting background animation */}
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
 
-      {/* Animated gradient glow layers */}
+      {/* Subtle gradient glow layers retained for depth */}
       <div className="absolute inset-0 pointer-events-none">
-        <div className="w-full h-full bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-emerald-700/25 via-emerald-500/10 to-transparent" />
-        <div className="absolute -inset-1 blur-3xl opacity-50">
-          <div className="w-full h-full bg-gradient-to-tr from-emerald-600/20 via-emerald-400/10 to-sky-500/10 animate-[spin_18s_linear_infinite] rounded-full" />
+        <div className="w-full h-full bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-emerald-700/20 via-emerald-500/10 to-transparent" />
+        <div className="absolute -inset-1 blur-3xl opacity-40">
+          <div className="w-full h-full bg-gradient-to-tr from-emerald-600/15 via-emerald-400/10 to-sky-500/10 animate-[spin_24s_linear_infinite] rounded-full" />
         </div>
       </div>
 
